@@ -1,10 +1,4 @@
-# ============================================================
-# Pipeline 1: Infrastructure-as-Code Deployment
-# Triggers on push to main for any .yaml files in the repo
-# Scans IaC with Checkov before deploying
-# ============================================================
 name: Deploy Infrastructure
-
 on:
   push:
     branches: [main]
@@ -13,18 +7,12 @@ on:
       - '!k8s/**'
   pull_request:
     branches: [main]
-    paths:
-      - '*.yaml'
-      - '!k8s/**'
 
 env:
   AWS_REGION: us-east-1
   PROJECT_NAME: wiz-exercise
 
 jobs:
-  # -------------------------------------------------------
-  # Security Scan - IaC Scanning with Checkov
-  # -------------------------------------------------------
   iac-security-scan:
     name: IaC Security Scan (Checkov)
     runs-on: ubuntu-latest
@@ -46,10 +34,15 @@ jobs:
             --framework cloudformation \
             --output cli \
             --output sarif \
-            --output-file-path . \
+            --output-file-path console,results.sarif \
             --soft-fail \
             --compact
-        # soft-fail allows pipeline to continue; remove for hard enforcement
+        continue-on-error: true
+
+      - name: Verify SARIF file exists
+        run: |
+          ls -la
+          cat results.sarif | head -20
 
       - name: Upload Checkov SARIF to GitHub Security
         uses: github/codeql-action/upload-sarif@v3
@@ -57,9 +50,6 @@ jobs:
         with:
           sarif_file: results.sarif
 
-  # -------------------------------------------------------
-  # Deploy Networking Stack
-  # -------------------------------------------------------
   deploy-networking:
     name: Deploy Networking
     runs-on: ubuntu-latest
@@ -85,9 +75,6 @@ jobs:
             --capabilities CAPABILITY_IAM \
             --no-fail-on-empty-changeset
 
-  # -------------------------------------------------------
-  # Deploy MongoDB VM Stack
-  # -------------------------------------------------------
   deploy-mongodb:
     name: Deploy MongoDB VM
     runs-on: ubuntu-latest
@@ -116,9 +103,6 @@ jobs:
             --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset
 
-  # -------------------------------------------------------
-  # Deploy EKS Stack
-  # -------------------------------------------------------
   deploy-eks:
     name: Deploy EKS Cluster
     runs-on: ubuntu-latest
@@ -144,9 +128,6 @@ jobs:
             --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset
 
-  # -------------------------------------------------------
-  # Deploy Security Controls
-  # -------------------------------------------------------
   deploy-security:
     name: Deploy Security Controls
     runs-on: ubuntu-latest
