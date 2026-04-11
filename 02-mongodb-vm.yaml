@@ -1,0 +1,240 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Wiz Exercise - MongoDB VM + S3 Backup Bucket (intentionally misconfigured)'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: wiz-exercise
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for SSH access
+  YourIP:
+    Type: String
+    Description: Your public IP (CIDR) for SSH. Use 0.0.0.0/0 as required by exercise.
+    Default: 0.0.0.0/0
+  MongoPassword:
+    Type: String
+    NoEcho: true
+    Default: WizExercise2024!
+    Description: MongoDB admin password
+
+Outputs:
+  MongoInstanceId:
+    Value: !Ref MongoEC2
+    Export:
+      Name: !Sub "${ProjectName}-MongoInstanceId"
+  MongoPrivateIP:
+    Value: !GetAtt MongoEC2.PrivateIp
+    Export:
+      Name: !Sub "${ProjectName}-MongoPrivateIP"
+  MongoPublicIP:
+    Value: !GetAtt MongoEC2.PublicIp
+    Export:
+      Name: !Sub "${ProjectName}-MongoPublicIP"
+  BackupBucketName:
+    Value: !Ref BackupBucket
+    Export:
+      Name: !Sub "${ProjectName}-BackupBucket"
+  MongoSecurityGroupId:
+    Value: !Ref MongoSG
+    Export:
+      Name: !Sub "${ProjectName}-MongoSGId"
+
+Resources:
+  # -------------------------------------------------------
+  # S3 Backup Bucket - INTENTIONALLY public (exercise requirement)
+  # -------------------------------------------------------
+  BackupBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-mongodb-backups-${AWS::AccountId}"
+      # Exercise requires public read + listing
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-backups"
+        - Key: SecurityNote
+          Value: "INTENTIONALLY_MISCONFIGURED_FOR_WIZ_EXERCISE"
+
+  BackupBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref BackupBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: "*"
+            Action:
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !GetAtt BackupBucket.Arn
+              - !Sub "${BackupBucket.Arn}/*"
+
+  # -------------------------------------------------------
+  # IAM Role for EC2 - INTENTIONALLY overly permissive
+  # -------------------------------------------------------
+  MongoInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-mongo-instance-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      # Overly permissive as required by exercise (can create VMs + full S3)
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+      Tags:
+        - Key: SecurityNote
+          Value: "INTENTIONALLY_OVERPERMISSIVE_FOR_WIZ_EXERCISE"
+
+  MongoInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${ProjectName}-mongo-instance-profile"
+      Roles:
+        - !Ref MongoInstanceRole
+
+  # -------------------------------------------------------
+  # Security Group - SSH open to internet (exercise requirement)
+  # -------------------------------------------------------
+  MongoSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: MongoDB Server Security Group
+      VpcId: !ImportValue
+        Fn::Sub: "${ProjectName}-VpcId"
+      SecurityGroupIngress:
+        # SSH open to internet - intentional per exercise
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref YourIP
+          Description: "SSH - INTENTIONALLY open per exercise"
+        # MongoDB only from VPC (K8s cluster) - this is correctly restricted
+        - IpProtocol: tcp
+          FromPort: 27017
+          ToPort: 27017
+          CidrIp: 10.0.0.0/16
+          Description: "MongoDB access from VPC (K8s)"
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-mongo-sg"
+
+  # -------------------------------------------------------
+  # EC2 Instance - outdated Ubuntu 20.04 + MongoDB 4.4
+  # Using Ubuntu 20.04 (EOL April 2025) with MongoDB 4.4 (EOL Feb 2024)
+  # -------------------------------------------------------
+  MongoEC2:
+    Type: AWS::EC2::Instance
+    Properties:
+      # Ubuntu 20.04 LTS (outdated - EOL) - ami varies by region;
+      ImageId: ami-0fb0b230890ccd1e6
+      InstanceType: t3.micro
+      KeyName: !Ref KeyPairName
+      SubnetId: !ImportValue
+        Fn::Sub: "${ProjectName}-PublicSubnet1Id"
+      SecurityGroupIds:
+        - !Ref MongoSG
+      IamInstanceProfile: !Ref MongoInstanceProfile
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-mongodb-server"
+        - Key: SecurityNote
+          Value: "INTENTIONALLY_OUTDATED_OS_AND_DB"
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          exec > /var/log/user-data.log 2>&1
+
+          apt-get update -y
+          apt-get install -y gnupg curl awscli
+
+          # Install MongoDB 4.4 (1+ year outdated, EOL Feb 2024)
+          curl -fsSL https://www.mongodb.org/static/pgp/server-4.4.asc | apt-key add -
+          echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu focal/mongodb-org/4.4 multiverse" \
+            > /etc/apt/sources.list.d/mongodb-org-4.4.list
+          apt-get update -y
+          apt-get install -y mongodb-org=4.4.29 mongodb-org-server=4.4.29 \
+            mongodb-org-shell=4.4.29 mongodb-org-mongos=4.4.29 mongodb-org-tools=4.4.29
+
+          # Pin version to prevent accidental upgrades
+          echo "mongodb-org hold"        | dpkg --set-selections
+          echo "mongodb-org-server hold" | dpkg --set-selections
+          echo "mongodb-org-shell hold"  | dpkg --set-selections
+
+          # Start MongoDB temporarily without auth to create admin user
+          systemctl start mongod
+          sleep 5
+
+          mongo admin --eval "
+            db.createUser({
+              user: 'admin',
+              pwd: '${MongoPassword}',
+              roles: [{ role: 'root', db: 'admin' }]
+            });
+            db.createUser({
+              user: 'appuser',
+              pwd: '${MongoPassword}',
+              roles: [{ role: 'readWrite', db: 'todos' }]
+            });
+          "
+
+          # Enable authentication in mongod config
+          cat > /etc/mongod.conf <<'MONGOCFG'
+          storage:
+            dbPath: /var/lib/mongodb
+          systemLog:
+            destination: file
+            logAppend: true
+            path: /var/log/mongodb/mongod.log
+          net:
+            port: 27017
+            bindIp: 0.0.0.0
+          security:
+            authorization: enabled
+          MONGOCFG
+
+          systemctl restart mongod
+          systemctl enable mongod
+
+          # Create backup script
+          cat > /usr/local/bin/mongo-backup.sh <<BACKUPSCRIPT
+          #!/bin/bash
+          TIMESTAMP=\$(date +%Y%m%d_%H%M%S)
+          BACKUP_DIR=/tmp/mongo-backup-\$TIMESTAMP
+          BUCKET=${BackupBucket}
+
+          mkdir -p \$BACKUP_DIR
+          mongodump --uri="mongodb://admin:${MongoPassword}@localhost:27017/?authSource=admin" \
+            --out=\$BACKUP_DIR
+
+          tar -czf /tmp/mongo-backup-\$TIMESTAMP.tar.gz -C /tmp mongo-backup-\$TIMESTAMP
+          aws s3 cp /tmp/mongo-backup-\$TIMESTAMP.tar.gz s3://\$BUCKET/backups/\$TIMESTAMP.tar.gz
+
+          rm -rf \$BACKUP_DIR /tmp/mongo-backup-\$TIMESTAMP.tar.gz
+          echo "Backup completed: \$TIMESTAMP"
+          BACKUPSCRIPT
+
+          chmod +x /usr/local/bin/mongo-backup.sh
+
+          # Schedule daily backup via cron
+          echo "0 2 * * * root /usr/local/bin/mongo-backup.sh >> /var/log/mongo-backup.log 2>&1" \
+            > /etc/cron.d/mongo-backup
+
+          echo "MongoDB setup complete!"

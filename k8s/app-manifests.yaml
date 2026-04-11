@@ -1,0 +1,156 @@
+# ============================================================
+# Wiz Exercise - Kubernetes Manifests
+# Deploy the todo app with intentional misconfigurations:
+#   - ClusterAdmin role binding (exercise requirement)
+#   - MongoDB URI via secret (env var requirement)
+#   - Ingress via ALB
+# ============================================================
+
+---
+# Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: wiz-app
+
+---
+# MongoDB connection secret
+# IMPORTANT: base64 encode your values:
+#   echo -n "mongodb://appuser:WizExercise2024@<MONGO_PRIVATE_IP>:27017/todos?authSource=admin" | base64
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mongo-secret
+  namespace: wiz-app
+type: Opaque
+stringData:
+  # Replace <MONGO_PRIVATE_IP> with the actual private IP from CloudFormation output
+  MONGO_URI: "mongodb://appuser:WizExercise2024!@10.0.1.49:27017/todos?authSource=admin"
+
+---
+# ServiceAccount for the app pod
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: wiz-app-sa
+  namespace: wiz-app
+
+---
+# ClusterRoleBinding - INTENTIONALLY overly permissive (exercise requirement)
+# Gives the app pod cluster-admin privileges
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: wiz-app-cluster-admin
+  labels:
+    security-note: "INTENTIONALLY_MISCONFIGURED_FOR_WIZ_EXERCISE"
+subjects:
+  - kind: ServiceAccount
+    name: wiz-app-sa
+    namespace: wiz-app
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wiz-todo-app
+  namespace: wiz-app
+  labels:
+    app: wiz-todo-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: wiz-todo-app
+  template:
+    metadata:
+      labels:
+        app: wiz-todo-app
+    spec:
+      serviceAccountName: wiz-app-sa
+      containers:
+        - name: todo-app
+          # Replace with your actual ECR URI from CloudFormation output
+          image: 767828727505.dkr.ecr.us-east-1.amazonaws.com/wiz-exercise-app:latest
+          ports:
+            - containerPort: 3000
+          env:
+            - name: MONGO_URI
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-secret
+                  key: MONGO_URI
+            - name: PORT
+              value: "3000"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+
+---
+# Service (ClusterIP - traffic comes through ingress)
+apiVersion: v1
+kind: Service
+metadata:
+  name: wiz-todo-svc
+  namespace: wiz-app
+spec:
+  selector:
+    app: wiz-todo-app
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 3000
+  type: ClusterIP
+
+---
+# Ingress using AWS Load Balancer Controller
+# Prerequisites: Install AWS Load Balancer Controller in your cluster
+# kubectl apply -k "github.com/aws/eks-charts/stable/aws-load-balancer-controller//crds?ref=master"
+# helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+#   -n kube-system \
+#   --set clusterName=wiz-exercise-eks \
+#   --set serviceAccount.create=false \
+#   --set serviceAccount.name=aws-load-balancer-controller
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: wiz-todo-ingress
+  namespace: wiz-app
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: wiz-todo-svc
+                port:
+                  number: 80

@@ -1,0 +1,317 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Wiz Exercise - Cloud Native Security Controls (CloudTrail, Config, GuardDuty, SCPs)'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: wiz-exercise
+  AlertEmail:
+    Type: String
+    Description: Email address for security alerts
+    Default: ankitkhanna993@gmail.com
+
+Resources:
+  # -------------------------------------------------------
+  # CloudTrail - Control Plane Audit Logging (REQUIRED)
+  # -------------------------------------------------------
+  CloudTrailBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-cloudtrail-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldLogs
+            Status: Enabled
+            ExpirationInDays: 90
+
+  CloudTrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CloudTrailBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt CloudTrailBucket.Arn
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${CloudTrailBucket.Arn}/AWSLogs/${AWS::AccountId}/*"
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+
+  CloudTrailLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/cloudtrail/${ProjectName}"
+      RetentionInDays: 30
+
+  CloudTrailRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudTrailCWLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt CloudTrailLogGroup.Arn
+
+  # Main CloudTrail (control plane audit logging)
+  WizCloudTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: CloudTrailBucketPolicy
+    Properties:
+      TrailName: !Sub "${ProjectName}-audit-trail"
+      S3BucketName: !Ref CloudTrailBucket
+      IsLogging: true
+      IsMultiRegionTrail: false
+      IncludeGlobalServiceEvents: true
+      EnableLogFileValidation: true
+      CloudWatchLogsLogGroupArn: !GetAtt CloudTrailLogGroup.Arn
+      CloudWatchLogsRoleArn: !GetAtt CloudTrailRole.Arn
+      EventSelectors:
+        - ReadWriteType: All
+          IncludeManagementEvents: true
+          DataResources:
+            - Type: AWS::S3::Object
+              Values:
+                - !Sub "arn:aws:s3:::${ProjectName}-mongodb-backups-${AWS::AccountId}/"
+
+  # -------------------------------------------------------
+  # GuardDuty - Detective Control (REQUIRED)
+  # -------------------------------------------------------
+  # GuardDutyDetector:
+  #   Type: AWS::GuardDuty::Detector
+  #   Properties:
+  #     Enable: true
+  #     FindingPublishingFrequency: SIX_HOURS
+  #     DataSources:
+  #       S3Logs:
+  #         Enable: true
+  #       Kubernetes:
+  #         AuditLogs:
+  #           Enable: true
+  #       MalwareProtection:
+  #         ScanEc2InstanceWithFindings:
+  #           EbsVolumes: true
+
+  # -------------------------------------------------------
+  # SNS for Security Alerts
+  # -------------------------------------------------------
+  SecurityAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${ProjectName}-security-alerts"
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlertEmail
+
+  # -------------------------------------------------------
+  # EventBridge Rule - Alert on GuardDuty HIGH findings
+  # -------------------------------------------------------
+  GuardDutyHighFindingRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ProjectName}-guardduty-high-findings"
+      Description: Alert on GuardDuty HIGH and CRITICAL severity findings
+      EventPattern:
+        source:
+          - aws.guardduty
+        detail-type:
+          - GuardDuty Finding
+        detail:
+          severity:
+            - numeric:
+              - ">="
+              - 7
+      State: ENABLED
+      Targets:
+        - Arn: !Ref SecurityAlertsTopic
+          Id: SecurityAlertsSNS
+
+  SecurityAlertsTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref SecurityAlertsTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref SecurityAlertsTopic
+
+  # -------------------------------------------------------
+  # AWS Config - Preventative / Detective Compliance
+  # -------------------------------------------------------
+  # ConfigBucket:
+  #   Type: AWS::S3::Bucket
+  #   Properties:
+  #     BucketName: !Sub "${ProjectName}-config-${AWS::AccountId}"
+  #     PublicAccessBlockConfiguration:
+  #       BlockPublicAcls: true
+  #       BlockPublicPolicy: true
+  #       IgnorePublicAcls: true
+  #       RestrictPublicBuckets: true
+
+  # ConfigBucketPolicy:
+  #   Type: AWS::S3::BucketPolicy
+  #   Properties:
+  #     Bucket: !Ref ConfigBucket
+  #     PolicyDocument:
+  #       Version: "2012-10-17"
+  #       Statement:
+  #         - Sid: AWSConfigBucketPermissionsCheck
+  #           Effect: Allow
+  #           Principal:
+  #             Service: config.amazonaws.com
+  #           Action: s3:GetBucketAcl
+  #           Resource: !GetAtt ConfigBucket.Arn
+  #         - Sid: AWSConfigBucketDelivery
+  #           Effect: Allow
+  #           Principal:
+  #             Service: config.amazonaws.com
+  #           Action: s3:PutObject
+  #           Resource: !Sub "${ConfigBucket.Arn}/AWSLogs/${AWS::AccountId}/Config/*"
+
+  # ConfigRecorderRole:
+  #   Type: AWS::IAM::Role
+  #   Properties:
+  #     AssumeRolePolicyDocument:
+  #       Version: "2012-10-17"
+  #       Statement:
+  #         - Effect: Allow
+  #           Principal:
+  #             Service: config.amazonaws.com
+  #           Action: sts:AssumeRole
+  #     ManagedPolicyArns:
+  #       - arn:aws:iam::aws:policy/service-role/AWS_ConfigRole
+
+  # ConfigRecorder:
+  #   Type: AWS::Config::ConfigurationRecorder
+  #   Properties:
+  #     Name: !Sub "${ProjectName}-config-recorder"
+  #     RoleARN: !GetAtt ConfigRecorderRole.Arn
+  #     RecordingGroup:
+  #       AllSupported: true
+  #       IncludeGlobalResourceTypes: true
+
+  # ConfigDeliveryChannel:
+  #   Type: AWS::Config::DeliveryChannel
+  #   DependsOn: ConfigBucketPolicy
+  #   Properties:
+  #     Name: !Sub "${ProjectName}-delivery-channel"
+  #     S3BucketName: !Ref ConfigBucket
+  #     ConfigSnapshotDeliveryProperties:
+  #       DeliveryFrequency: TwentyFour_Hours
+
+  # -------------------------------------------------------
+  # AWS Config Rules - Preventative Controls (REQUIRED)
+  # -------------------------------------------------------
+
+  # Rule: Detect publicly accessible S3 buckets
+  S3PublicReadRule:
+    Type: AWS::Config::ConfigRule
+    # DependsOn: ConfigRecorder
+    Properties:
+      ConfigRuleName: !Sub "${ProjectName}-s3-no-public-read"
+      Description: Checks that S3 buckets do not allow public read access (flags our intentional one)
+      Source:
+        Owner: AWS
+        SourceIdentifier: S3_BUCKET_PUBLIC_READ_PROHIBITED
+
+  # Rule: SSH not open to world
+  SSHRestrictedRule:
+    Type: AWS::Config::ConfigRule
+    # DependsOn: ConfigRecorder
+    Properties:
+      ConfigRuleName: !Sub "${ProjectName}-ssh-restricted"
+      Description: Checks that SSH is not open to 0.0.0.0/0 (flags our intentional config)
+      Source:
+        Owner: AWS
+        SourceIdentifier: INCOMING_SSH_DISABLED
+
+  # Rule: Root account MFA
+  RootMFARule:
+    Type: AWS::Config::ConfigRule
+    # DependsOn: ConfigRecorder
+    Properties:
+      ConfigRuleName: !Sub "${ProjectName}-root-mfa-enabled"
+      Description: Checks that root account has MFA enabled
+      Source:
+        Owner: AWS
+        SourceIdentifier: ROOT_ACCOUNT_MFA_ENABLED
+
+  # Rule: EKS logging enabled
+  EKSLoggingRule:
+    Type: AWS::Config::ConfigRule
+    # DependsOn: ConfigRecorder
+    Properties:
+      ConfigRuleName: !Sub "${ProjectName}-eks-logging-enabled"
+      Description: Checks EKS cluster has logging enabled
+      Source:
+        Owner: AWS
+        SourceIdentifier: EKS_CLUSTER_LOGGING_ENABLED
+
+  # Rule: CloudTrail enabled
+  CloudTrailEnabledRule:
+    Type: AWS::Config::ConfigRule
+    # DependsOn: ConfigRecorder
+    Properties:
+      ConfigRuleName: !Sub "${ProjectName}-cloudtrail-enabled"
+      Description: Checks CloudTrail is enabled in all regions
+      Source:
+        Owner: AWS
+        SourceIdentifier: CLOUD_TRAIL_ENABLED
+
+  # Rule: IAM no wildcard actions on policies
+  IAMWildcardRule:
+    Type: AWS::Config::ConfigRule
+    # DependsOn: ConfigRecorder
+    Properties:
+      ConfigRuleName: !Sub "${ProjectName}-iam-no-inline-policy-check"
+      Description: Checks for IAM inline policies with wildcard permissions
+      Source:
+        Owner: AWS
+        SourceIdentifier: IAM_NO_INLINE_POLICY_CHECK
+
+Outputs:
+  # GuardDutyDetectorId:
+  #   Value: !Ref GuardDutyDetector
+  #   Export:
+  #     Name: !Sub "${ProjectName}-GuardDutyDetectorId"
+  SecurityAlertsTopicArn:
+    Value: !Ref SecurityAlertsTopic
+    Export:
+      Name: !Sub "${ProjectName}-SecurityAlertsTopic"
+  CloudTrailArn:
+    Value: !GetAtt WizCloudTrail.Arn
+    Export:
+      Name: !Sub "${ProjectName}-CloudTrailArn"

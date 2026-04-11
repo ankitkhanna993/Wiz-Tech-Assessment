@@ -1,0 +1,14 @@
+{
+  "name": "wiz-todo-app",
+  "version": "1.0.0",
+  "description": "Wiz Exercise Todo Application",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "mongoose": "^7.6.3",
+    "ejs": "^3.1.9"
+  }
+}

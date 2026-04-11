@@ -1,0 +1,175 @@
+# ============================================================
+# Pipeline 1: Infrastructure-as-Code Deployment
+# Triggers on push to main for any .yaml files in the repo
+# Scans IaC with Checkov before deploying
+# ============================================================
+name: Deploy Infrastructure
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '*.yaml'
+      - '!k8s/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - '*.yaml'
+      - '!k8s/**'
+
+env:
+  AWS_REGION: us-east-1
+  PROJECT_NAME: wiz-exercise
+
+jobs:
+  # -------------------------------------------------------
+  # Security Scan - IaC Scanning with Checkov
+  # -------------------------------------------------------
+  iac-security-scan:
+    name: IaC Security Scan (Checkov)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install Checkov
+        run: pip install checkov
+
+      - name: Run Checkov on CloudFormation templates
+        run: |
+          checkov -d . \
+            --framework cloudformation \
+            --output cli \
+            --output sarif \
+            --output-file-path . \
+            --soft-fail \
+            --compact
+        # soft-fail allows pipeline to continue; remove for hard enforcement
+
+      - name: Upload Checkov SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: results.sarif
+
+  # -------------------------------------------------------
+  # Deploy Networking Stack
+  # -------------------------------------------------------
+  deploy-networking:
+    name: Deploy Networking
+    runs-on: ubuntu-latest
+    needs: iac-security-scan
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy Networking Stack
+        run: |
+          aws cloudformation deploy \
+            --template-file 01-networking.yaml \
+            --stack-name ${{ env.PROJECT_NAME }}-networking \
+            --parameter-overrides ProjectName=${{ env.PROJECT_NAME }} \
+            --capabilities CAPABILITY_IAM \
+            --no-fail-on-empty-changeset
+
+  # -------------------------------------------------------
+  # Deploy MongoDB VM Stack
+  # -------------------------------------------------------
+  deploy-mongodb:
+    name: Deploy MongoDB VM
+    runs-on: ubuntu-latest
+    needs: deploy-networking
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy MongoDB Stack
+        run: |
+          aws cloudformation deploy \
+            --template-file 02-mongodb-vm.yaml \
+            --stack-name ${{ env.PROJECT_NAME }}-mongodb \
+            --parameter-overrides \
+              ProjectName=${{ env.PROJECT_NAME }} \
+              KeyPairName=${{ secrets.EC2_KEY_PAIR_NAME }} \
+              MongoPassword=${{ secrets.MONGO_PASSWORD }} \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
+
+  # -------------------------------------------------------
+  # Deploy EKS Stack
+  # -------------------------------------------------------
+  deploy-eks:
+    name: Deploy EKS Cluster
+    runs-on: ubuntu-latest
+    needs: deploy-networking
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy EKS Stack
+        run: |
+          aws cloudformation deploy \
+            --template-file 03-eks-cluster.yaml \
+            --stack-name ${{ env.PROJECT_NAME }}-eks \
+            --parameter-overrides ProjectName=${{ env.PROJECT_NAME }} \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
+
+  # -------------------------------------------------------
+  # Deploy Security Controls
+  # -------------------------------------------------------
+  deploy-security:
+    name: Deploy Security Controls
+    runs-on: ubuntu-latest
+    needs: [deploy-mongodb, deploy-eks]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy Security Stack
+        run: |
+          aws cloudformation deploy \
+            --template-file 04-security-controls.yaml \
+            --stack-name ${{ env.PROJECT_NAME }}-security \
+            --parameter-overrides \
+              ProjectName=${{ env.PROJECT_NAME }} \
+              AlertEmail=${{ secrets.ALERT_EMAIL }} \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
