@@ -16,7 +16,7 @@ metadata:
 ---
 # MongoDB connection secret
 # IMPORTANT: base64 encode your values:
-#   echo -n "mongodb://appuser:WizExercise2024@<MONGO_PRIVATE_IP>:27017/todos?authSource=admin" | base64
+#   echo -n "mongodb://appuser:WizExercise2024@10.0.1.49:27017/todos?authSource=admin" | base64
 apiVersion: v1
 kind: Secret
 metadata:
@@ -24,7 +24,7 @@ metadata:
   namespace: wiz-app
 type: Opaque
 stringData:
-  # Replace <MONGO_PRIVATE_IP> with the actual private IP from CloudFormation output
+  # Replace 10.0.1.49 with the actual private IP from CloudFormation output
   MONGO_URI: "mongodb://appuser:WizExercise2024!@10.0.1.49:27017/todos?authSource=admin"
 
 ---
@@ -154,3 +154,4 @@ spec:
                 name: wiz-todo-svc
                 port:
                   number: 80
+

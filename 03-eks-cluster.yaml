@@ -147,3 +147,4 @@ Resources:
       AmiType: AL2_x86_64
       Tags:
         Name: !Sub "${ProjectName}-nodes"
+
